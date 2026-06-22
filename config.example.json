@@ -1,0 +1,41 @@
+{
+  "region": {
+    "height": 200,
+    "left": 0,
+    "top": 0,
+    "width": 800
+  },
+  "interval_seconds": 5.0,
+  "capture_fps": 3.0,
+  "translator_backend": "argos",
+  "deepl_api_key": "",
+  "deepl_target": "EN-US",
+  "ollama_host": "http://localhost:11434",
+  "ollama_model": "qwen2.5:3b",
+  "ocr_gpu": true,
+  "min_confidence": 0.5,
+  "ocr_upscale": 2.0,
+  "font_size": 13,
+  "overlay_mode": "panel",
+  "subtitle_anchor": "bottom",
+  "feed_max_lines": 18,
+  "feed_ttl_seconds": 20.0,
+  "russian_only": true,
+  "overlay_opacity": 0.35,
+  "overlay_bg": [
+    0,
+    0,
+    0,
+    140
+  ],
+  "overlay_fg": [
+    255,
+    255,
+    255,
+    255
+  ],
+  "click_through": true,
+  "change_threshold": 6.0,
+  "hotkey_toggle": "<ctrl>+<alt>+t",
+  "hotkey_region": "<ctrl>+<alt>+r"
+}

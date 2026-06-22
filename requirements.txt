@@ -1,0 +1,10 @@
+# Real-Time On-Screen Russian Translator — dependencies
+# Install PyTorch separately with CUDA (see README) BEFORE installing this file,
+# so EasyOCR uses the GPU instead of the CPU-only torch wheel.
+
+mss>=9.0.1            # fast screen capture
+numpy>=1.26          # image arrays
+easyocr>=1.7.1       # Russian OCR (uses PyTorch/GPU)
+argostranslate>=1.9  # offline ru->en translation
+PySide6>=6.6         # overlay + UI
+pynput>=1.7          # global hotkeys
