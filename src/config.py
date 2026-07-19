@@ -12,11 +12,11 @@ DEFAULTS = {
     "region": None,                 # [left, top, width, height] in physical px, or null
     "interval_seconds": 5.0,        # snapshot/translate every N seconds
     "capture_fps": 3.0,             # (unused in snapshot mode; kept for reference)
-    "translator_backend": "argos",  # "argos"/"nllb" (offline), "deepl" (API), "ollama" (local LLM)
+    "translator_backend": "nllb",   # "nllb"/"argos" (offline), "deepl" (API), "ollama" (local LLM)
     "deepl_api_key": "",            # DeepL auth key (free keys end in ":fx")
     "deepl_target": "EN-US",        # DeepL target language
     "ollama_host": "http://localhost:11434",
-    "ollama_model": "qwen2.5:3b",
+    "ollama_model": "translategemma:4b",
     "ocr_gpu": True,                # use CUDA for EasyOCR
     "ocr_engine": "rapidocr",       # "rapidocr" (CPU, fast, no VRAM) or "easyocr" (GPU)
     "ocr_languages": ["ru", "en"],  # EasyOCR langs; CJK ("ja","ch_sim","ko") must pair with "en" only

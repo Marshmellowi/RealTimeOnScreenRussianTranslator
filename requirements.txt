@@ -1,13 +1,19 @@
-# Real-Time On-Screen Translator — dependencies
-# Install PyTorch separately with CUDA (see README) BEFORE installing this file,
-# so EasyOCR uses the GPU instead of the CPU-only torch wheel.
+# Real-Time On-Screen Translator — core dependencies
+# This is everything the default setup needs (RapidOCR + NLLB offline
+# translation). Python 3.10–3.13.
 
 mss>=9.0.1            # fast screen capture
-numpy>=1.26          # image arrays
-easyocr>=1.7.1       # OCR engine option (uses PyTorch/GPU)
-rapidocr>=3.0        # OCR engine option (ONNX, CPU, fast + accurate)
-argostranslate>=1.9  # offline translation backend
-sentencepiece>=0.2   # NLLB tokenizer (offline translation backend)
-huggingface_hub>=0.23 # NLLB model download
-PySide6>=6.6         # overlay + UI
-pynput>=1.7          # global hotkeys
+numpy>=1.26           # image arrays
+rapidocr>=3.0         # default OCR engine (ONNX, CPU, fast + accurate)
+ctranslate2>=4.0      # NLLB inference (offline translation)
+sentencepiece>=0.2    # NLLB tokenizer
+huggingface_hub>=0.23 # NLLB model download (first run only)
+PySide6>=6.6          # overlay + UI
+pynput>=1.7           # global hotkeys
+
+# ---------------------------------------------------------------------------
+# Optional extras (see README):
+#   pip install easyocr        -> EasyOCR engine (needs PyTorch; GPU build
+#                                 recommended, see README GPU section)
+#   pip install argostranslate -> Argos offline backend (then run
+#                                 python setup_models.py)
