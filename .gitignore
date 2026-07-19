@@ -12,6 +12,9 @@ env/
 # Local config (contains personal screen region + API keys)
 config.json
 
+# Downloaded translation models (NLLB ~600MB; fetched on first use)
+models/
+
 # Logs / diagnostics
 *.log
 diag.log

@@ -75,7 +75,7 @@ class RegionSelector(QtWidgets.QWidget):
         p.drawText(
             self.rect().adjusted(0, 24, 0, 0),
             QtCore.Qt.AlignHCenter | QtCore.Qt.AlignTop,
-            "Drag a box over the Russian text.   Esc to cancel.",
+            "Drag a box over the text to translate.   Esc to cancel.",
         )
 
     def keyPressEvent(self, event):

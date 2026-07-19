@@ -4,13 +4,16 @@ overlay, and translation pipeline, plus global hotkeys.
 from __future__ import annotations
 
 import sys
+import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 import config
+import pipeline
+from compose import ComposeWindow
 from overlay import Overlay
 from pipeline import TranslatePipeline
 from region_selector import RegionSelector
@@ -21,6 +24,46 @@ class HotkeyBridge(QtCore.QObject):
     """Marshals pynput callbacks (a non-Qt thread) onto the Qt event loop."""
     toggle = QtCore.Signal()
     region = QtCore.Signal()
+    compose = QtCore.Signal()
+
+
+class InitBridge(QtCore.QObject):
+    """Marshals launch-time background init results onto the Qt event loop."""
+    status = QtCore.Signal(str)
+    ready_state = QtCore.Signal(bool)
+
+
+def _pynput_to_qt(hotkey: str) -> str:
+    """'<ctrl>+<alt>+t' -> 'Ctrl+Alt+T' (for showing in QKeySequenceEdit)."""
+    parts = []
+    for p in hotkey.split("+"):
+        p = p.strip()
+        if p.startswith("<") and p.endswith(">"):
+            name = p[1:-1]
+            parts.append({"cmd": "Meta", "enter": "Return"}.get(name, name.capitalize()))
+        elif p:
+            parts.append(p.upper())
+    return "+".join(parts)
+
+
+def _qt_to_pynput(seq: str) -> str:
+    """'Ctrl+Alt+T' -> '<ctrl>+<alt>+t' (pynput GlobalHotKeys format)."""
+    parts = []
+    for p in seq.split("+"):
+        p = p.strip()
+        if not p:
+            continue
+        low = p.lower()
+        if low in ("ctrl", "alt", "shift"):
+            parts.append(f"<{low}>")
+        elif low == "meta":
+            parts.append("<cmd>")
+        elif len(p) == 1:
+            parts.append(low)
+        else:
+            # Named keys: F1..F24, Space, Return, Esc, ...
+            parts.append(f"<{'enter' if low == 'return' else low}>")
+    return "+".join(parts)
 
 
 class SettingsDialog(QtWidgets.QDialog):
@@ -34,11 +77,34 @@ class SettingsDialog(QtWidgets.QDialog):
         self.provider = QtWidgets.QComboBox()
         self.provider.addItem("DeepL (API)", "deepl")
         self.provider.addItem("Ollama (local, free)", "ollama")
+        self.provider.addItem("NLLB (offline)", "nllb")
         self.provider.addItem("Argos (offline)", "argos")
         idx = self.provider.findData(cfg.get("translator_backend", "deepl"))
         if idx >= 0:
             self.provider.setCurrentIndex(idx)
         form.addRow("Provider:", self.provider)
+
+        self.source_lang = QtWidgets.QLineEdit(cfg.get("source_lang", "auto"))
+        self.source_lang.setPlaceholderText(
+            "auto (DeepL/Ollama detect; NLLB/Argos need a code like ru, ja, de)"
+        )
+        form.addRow("Source lang:", self.source_lang)
+
+        self.ocr_engine = QtWidgets.QComboBox()
+        self.ocr_engine.addItem("RapidOCR (CPU, fast, no VRAM)", "rapidocr")
+        self.ocr_engine.addItem("EasyOCR (GPU)", "easyocr")
+        idx = self.ocr_engine.findData(cfg.get("ocr_engine", "easyocr"))
+        if idx >= 0:
+            self.ocr_engine.setCurrentIndex(idx)
+        form.addRow("OCR engine:", self.ocr_engine)
+
+        self.ocr_langs = QtWidgets.QLineEdit(
+            ",".join(cfg.get("ocr_languages", ["ru", "en"]))
+        )
+        self.ocr_langs.setPlaceholderText(
+            "e.g. ru,en or ja,en (EasyOCR: CJK pairs only with en)"
+        )
+        form.addRow("OCR languages:", self.ocr_langs)
 
         self.deepl_key = QtWidgets.QLineEdit(cfg.get("deepl_api_key", ""))
         self.deepl_key.setPlaceholderText("blank = use DEEPL_API_KEY env var")
@@ -53,6 +119,21 @@ class SettingsDialog(QtWidgets.QDialog):
         )
         form.addRow("Ollama model:", self.ollama_model)
 
+        # Hotkey remapping: click a field and press the new combination.
+        self._hotkey_edits: dict[str, QtWidgets.QKeySequenceEdit] = {}
+        for cfg_key, label, default in (
+            ("hotkey_toggle", "Hotkey: translate on/off", "<ctrl>+<alt>+t"),
+            ("hotkey_region", "Hotkey: select region", "<ctrl>+<alt>+r"),
+            ("hotkey_compose", "Hotkey: compose message", "<ctrl>+<alt>+m"),
+        ):
+            edit = QtWidgets.QKeySequenceEdit(
+                QtGui.QKeySequence(_pynput_to_qt(cfg.get(cfg_key, default)))
+            )
+            edit.setMaximumSequenceLength(1)
+            edit.setClearButtonEnabled(True)
+            self._hotkey_edits[cfg_key] = edit
+            form.addRow(label, edit)
+
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
         )
@@ -65,6 +146,22 @@ class SettingsDialog(QtWidgets.QDialog):
         cfg["deepl_api_key"] = self.deepl_key.text().strip()
         cfg["ollama_host"] = self.ollama_host.text().strip()
         cfg["ollama_model"] = self.ollama_model.text().strip()
+        cfg["source_lang"] = self.source_lang.text().strip().lower() or "auto"
+        cfg["ocr_engine"] = self.ocr_engine.currentData()
+        langs = [l.strip().lower() for l in self.ocr_langs.text().split(",")]
+        cfg["ocr_languages"] = [l for l in langs if l] or ["ru", "en"]
+        for cfg_key, edit in self._hotkey_edits.items():
+            seq = edit.keySequence().toString()
+            if not seq:
+                continue  # cleared/empty: keep the current binding
+            hotkey = _qt_to_pynput(seq)
+            try:
+                from pynput import keyboard
+
+                keyboard.HotKey.parse(hotkey)
+            except Exception:
+                continue  # combination pynput can't register: keep the old one
+            cfg[cfg_key] = hotkey
 
 
 class ControlPanel(QtWidgets.QWidget):
@@ -74,19 +171,22 @@ class ControlPanel(QtWidgets.QWidget):
         self._pipeline: TranslatePipeline | None = None
         self._overlay = Overlay(cfg)
         self._selector: RegionSelector | None = None
+        self._compose: ComposeWindow | None = None
         self._active = False
 
-        self.setWindowTitle("RU Translator")
+        self.setWindowTitle("Screen Translator")
         self.setWindowFlag(QtCore.Qt.WindowStaysOnTopHint, True)
 
-        self._status = QtWidgets.QLabel("Idle.")
+        self._status = QtWidgets.QLabel("Starting…")
         self._status.setWordWrap(True)
         self._region_lbl = QtWidgets.QLabel(self._region_text())
         self._btn_region = QtWidgets.QPushButton("Select Region")
         self._btn_toggle = QtWidgets.QPushButton("Start")
+        self._btn_compose = QtWidgets.QPushButton("Compose…")
         self._btn_settings = QtWidgets.QPushButton("Settings…")
         self._btn_region.clicked.connect(self.choose_region)
         self._btn_toggle.clicked.connect(self.toggle)
+        self._btn_compose.clicked.connect(self.open_compose)
         self._btn_settings.clicked.connect(self.open_settings)
 
         # Opacity slider (live).
@@ -102,17 +202,41 @@ class ControlPanel(QtWidgets.QWidget):
         layout.addWidget(self._region_lbl)
         layout.addWidget(self._btn_region)
         layout.addWidget(self._btn_toggle)
+        layout.addWidget(self._btn_compose)
         layout.addWidget(self._btn_settings)
         layout.addWidget(self._opacity_lbl)
         layout.addWidget(self._opacity)
         layout.addWidget(self._status)
         self.resize(280, 200)
 
-        if not backend_ready(self._cfg):
-            self._status.setText(backend_hint(self._cfg))
-            self._btn_toggle.setEnabled(False)
-
         self._setup_hotkeys()
+
+        # Backend readiness + engine preload run off the GUI thread: the argos
+        # import alone takes seconds (tens, cold), and the Ollama probe can
+        # block up to 3s. The window shows immediately; Start becomes instant
+        # once the warm-up finishes.
+        self._init_bridge = InitBridge()
+        self._init_bridge.status.connect(self._on_init_status)
+        self._init_bridge.ready_state.connect(self._on_backend_checked)
+        threading.Thread(target=self._background_init, daemon=True).start()
+
+    # --- launch-time background init ------------------------------------
+    def _background_init(self):
+        ready = backend_ready(self._cfg)
+        self._init_bridge.ready_state.emit(ready)
+        if not ready:
+            self._init_bridge.status.emit(backend_hint(self._cfg))
+            return
+        pipeline.warm_up(self._cfg, status=self._init_bridge.status.emit)
+
+    def _on_init_status(self, msg: str):
+        # Don't stomp live pipeline status if the user already hit Start.
+        if not self._active:
+            self._status.setText(msg)
+
+    def _on_backend_checked(self, ready: bool):
+        if not ready and not self._active:
+            self._btn_toggle.setEnabled(False)
 
     # --- settings -------------------------------------------------------
     def open_settings(self):
@@ -121,6 +245,7 @@ class ControlPanel(QtWidgets.QWidget):
             return
         dlg.apply_to(self._cfg)
         config.save(self._cfg)
+        self._setup_hotkeys()  # re-register in case hotkeys were remapped
         provider = self._cfg.get("translator_backend")
         ready = backend_ready(self._cfg)
         self._btn_toggle.setEnabled(ready or self._active)
@@ -139,6 +264,12 @@ class ControlPanel(QtWidgets.QWidget):
         self._cfg["overlay_opacity"] = val
         self._opacity_lbl.setText(f"Opacity: {value}%")
         self._overlay.setWindowOpacity(val)
+
+    # --- compose --------------------------------------------------------
+    def open_compose(self):
+        if self._compose is None:
+            self._compose = ComposeWindow(self._cfg)
+        self._compose.open()
 
     # --- region ---------------------------------------------------------
     def _region_text(self) -> str:
@@ -196,9 +327,18 @@ class ControlPanel(QtWidgets.QWidget):
 
     # --- hotkeys --------------------------------------------------------
     def _setup_hotkeys(self):
-        self._bridge = HotkeyBridge()
-        self._bridge.toggle.connect(self.toggle)
-        self._bridge.region.connect(self.choose_region)
+        # Re-entrant: called again after Settings to apply remapped hotkeys.
+        if getattr(self, "_hotkeys", None):
+            try:
+                self._hotkeys.stop()
+            except Exception:
+                pass
+            self._hotkeys = None
+        if not hasattr(self, "_bridge"):
+            self._bridge = HotkeyBridge()
+            self._bridge.toggle.connect(self.toggle)
+            self._bridge.region.connect(self.choose_region)
+            self._bridge.compose.connect(self.open_compose)
         try:
             from pynput import keyboard
 
@@ -207,6 +347,8 @@ class ControlPanel(QtWidgets.QWidget):
                     self._bridge.toggle.emit,
                 self._cfg.get("hotkey_region", "<ctrl>+<alt>+r"):
                     self._bridge.region.emit,
+                self._cfg.get("hotkey_compose", "<ctrl>+<alt>+m"):
+                    self._bridge.compose.emit,
             })
             self._hotkeys.daemon = True
             self._hotkeys.start()
@@ -216,6 +358,8 @@ class ControlPanel(QtWidgets.QWidget):
     def closeEvent(self, event):
         self.stop()
         self._overlay.close()
+        if self._compose:
+            self._compose.close()
         super().closeEvent(event)
 
 

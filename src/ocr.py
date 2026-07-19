@@ -1,19 +1,25 @@
-"""EasyOCR wrapper for Russian text detection.
+"""OCR engines (EasyOCR / RapidOCR) for on-screen text detection.
 
-EasyOCR returns a list of (box, text, confidence) where box is 4 corner points
-in pixel coordinates relative to the input image (i.e. relative to the captured
-region). The pipeline offsets these by the region origin to place overlay text.
+Both engines expose read(rgb, min_confidence, upscale) returning
+[(x, y, w, h, text), ...] in pixel coordinates relative to the input image
+(i.e. relative to the captured region). The pipeline offsets these by the
+region origin to place overlay text.
 """
 from __future__ import annotations
 
 import re
 
-import cv2
-import numpy as np
+# cv2/numpy/easyocr are imported lazily inside methods: importing this module
+# must stay cheap so the GUI window can appear before the heavy libs load.
+from typing import TYPE_CHECKING
 
-# A row must contain at least one letter (Latin or Cyrillic) to be kept;
-# this drops standalone numbers, icons and punctuation (UI counters/timers).
-_HAS_LETTER = re.compile(r"[A-Za-zА-Яа-яЁё]")
+if TYPE_CHECKING:
+    import numpy as np
+
+# A row must contain at least one letter (any script: Latin, Cyrillic, CJK...)
+# to be kept; this drops standalone numbers, icons and punctuation
+# (UI counters/timers). [^\W\d_] matches any Unicode letter.
+_HAS_LETTER = re.compile(r"[^\W\d_]")
 
 
 def _group_rows(items):
@@ -49,12 +55,12 @@ def _group_rows(items):
 
 
 class OcrEngine:
-    def __init__(self, gpu: bool = True):
+    def __init__(self, langs: tuple[str, ...] = ("ru", "en"), gpu: bool = True):
         # Imported lazily so importing this module is cheap and so the (slow)
         # model load happens when the engine is actually constructed.
         import easyocr
 
-        self._reader = easyocr.Reader(["ru", "en"], gpu=gpu)
+        self._reader = easyocr.Reader(list(langs), gpu=gpu)
 
     def read(self, rgb: np.ndarray, min_confidence: float = 0.35, upscale: float = 1.0):
         """Return [(x, y, w, h, text), ...] for boxes above min_confidence.
@@ -62,6 +68,8 @@ class OcrEngine:
         Small stylized fonts (game chat/subtitles) OCR much better enlarged, so
         we optionally upscale before reading and map coordinates back down.
         """
+        import cv2
+
         img = rgb
         if upscale and upscale != 1.0:
             img = cv2.resize(
@@ -85,5 +93,82 @@ class OcrEngine:
             raw.append((x, y, w, h, text))
         # Merge same-row boxes (keeps "username: message" together), then drop
         # rows that are just numbers/symbols.
+        rows = _group_rows(raw)
+        return [r for r in rows if len(r[4]) >= 2 and _HAS_LETTER.search(r[4])]
+
+
+# Map app language codes to RapidOCR recognition model families. RapidOCR
+# loads ONE recognition model, so the first non-English language in the list
+# decides which one; all of them read English/Latin fine alongside.
+_RAPID_LANG = {
+    "ru": "eslav", "uk": "eslav", "be": "eslav", "bg": "cyrillic",
+    "sr": "cyrillic", "ja": "japan", "ko": "korean", "zh": "ch",
+    "ch_sim": "ch", "ch_tra": "chinese_cht", "ar": "arabic", "el": "el",
+    "th": "th", "hi": "devanagari", "ta": "ta", "te": "te", "ka": "ka",
+    "en": "en",
+}
+
+
+class RapidOcrEngine:
+    """RapidOCR (PP-OCRv5 ONNX models). CPU-only, ~2s load, no VRAM use, and
+    in testing more accurate than EasyOCR on Cyrillic UI text."""
+
+    def __init__(self, langs: tuple[str, ...] = ("ru", "en")):
+        import logging
+
+        from rapidocr import LangRec, ModelType, OCRVersion, RapidOCR
+
+        logging.getLogger("RapidOCR").setLevel(logging.WARNING)
+        lang = next(
+            (_RAPID_LANG[l] for l in langs
+             if l in _RAPID_LANG and _RAPID_LANG[l] != "en"),
+            "latin",
+        )
+        rec_lang = LangRec(lang)
+        # Not every (version, size) combo exists per language; fall back from
+        # the known-good v5 mobile models to RapidOCR's own defaults.
+        last_err: Exception | None = None
+        for params in (
+            {"Rec.lang_type": rec_lang, "Rec.ocr_version": OCRVersion.PPOCRV5,
+             "Rec.model_type": ModelType.MOBILE},
+            {"Rec.lang_type": rec_lang},
+            {},
+        ):
+            try:
+                self._ocr = RapidOCR(params=params)
+                break
+            except ValueError as e:
+                last_err = e
+        else:
+            raise RuntimeError(f"RapidOCR init failed: {last_err}")
+
+    def read(self, rgb: np.ndarray, min_confidence: float = 0.35, upscale: float = 1.0):
+        import cv2
+
+        img = rgb
+        if upscale and upscale != 1.0:
+            img = cv2.resize(
+                rgb, None, fx=upscale, fy=upscale, interpolation=cv2.INTER_CUBIC
+            )
+        res = self._ocr(img)
+        inv = 1.0 / upscale if upscale else 1.0
+        raw = []
+        for box, text, conf in zip(
+            res.boxes if res.boxes is not None else [],
+            res.txts or [],
+            res.scores or [],
+        ):
+            if conf is not None and conf < min_confidence:
+                continue
+            text = (text or "").strip()
+            if not text:
+                continue
+            xs = [p[0] for p in box]
+            ys = [p[1] for p in box]
+            x = int(min(xs) * inv)
+            y = int(min(ys) * inv)
+            w = int((max(xs) - min(xs)) * inv)
+            h = int((max(ys) - min(ys)) * inv)
+            raw.append((x, y, w, h, text))
         rows = _group_rows(raw)
         return [r for r in rows if len(r[4]) >= 2 and _HAS_LETTER.search(r[4])]
